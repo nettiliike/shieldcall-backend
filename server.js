@@ -27,6 +27,10 @@ const openai = new OpenAI({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Lisää Renderin Environment Variables -kohtaan esim.
+// FORWARD_TO_NUMBER=+358401234567
+const FORWARD_TO_NUMBER = process.env.FORWARD_TO_NUMBER || "";
+
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -47,6 +51,50 @@ function requireLogin(req, res, next) {
 function normalizeNumber(number) {
   if (!number) return "";
   return String(number).trim().replace(/\s+/g, "");
+}
+
+function escapeXml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function shouldForward(analysis) {
+  if (!FORWARD_TO_NUMBER) return false;
+  if (!analysis) return false;
+  if (analysis.action !== "Pass Through") return false;
+  return Number(analysis.risk || 0) <= 30;
+}
+
+function buildHangupTwiml(message) {
+  return `
+<Response>
+  <Say language="fi-FI" voice="alice">
+    ${escapeXml(message)}
+  </Say>
+  <Hangup/>
+</Response>
+  `;
+}
+
+function buildForwardTwiml(message) {
+  return `
+<Response>
+  <Say language="fi-FI" voice="alice">
+    ${escapeXml(message)}
+  </Say>
+  <Dial timeout="25" answerOnBridge="true">
+    <Number>${escapeXml(FORWARD_TO_NUMBER)}</Number>
+  </Dial>
+  <Say language="fi-FI" voice="alice">
+    Puheluun ei juuri nyt vastattu. Välitän viestin eteenpäin.
+  </Say>
+  <Hangup/>
+</Response>
+  `;
 }
 
 async function addNumber(type, number) {
@@ -97,7 +145,7 @@ async function checkNumberReputation(from) {
       label: "Trusted Caller",
       summary: "Numero löytyy luotettujen soittajien listalta.",
       action: "Pass Through",
-      nextStep: "✅ Luotettu numero. Puhelu voidaan päästää läpi tai soittaa takaisin.",
+      nextStep: "✅ Luotettu numero. Puhelu voidaan yhdistää Mikolle.",
       personaResponse: "",
     };
   }
@@ -122,6 +170,10 @@ Palauta VAIN validi JSON:
   "personaResponse": ""
 }
 
+Jos puhelu vaikuttaa tavalliselta yhteistyö-, asiakas-, toimitus-, varaus- tai muulta oikealta asialta, käytä action-arvona "Pass Through" ja risk alle 30.
+Jos kyseessä on puhelinmyynti, käytä action-arvona "Whisper Only".
+Jos kyseessä on huijaus, pankkitunnukset, salasana, korttitiedot tai kiireellinen uhkaus, käytä action-arvona "Block".
+
 Puhelun teksti:
 "${transcript}"
       `,
@@ -131,7 +183,7 @@ Puhelun teksti:
   } catch (error) {
     console.error("GPT error:", error.message);
 
-    const text = transcript.toLowerCase();
+    const text = String(transcript || "").toLowerCase();
 
     let risk = 20;
     let label = "Likely Safe";
@@ -152,7 +204,6 @@ Puhelun teksti:
     ];
 
     let hits = 0;
-
     redFlags.forEach((flag) => {
       if (text.includes(flag)) hits++;
     });
@@ -170,8 +221,7 @@ Puhelun teksti:
       label = "Suspicious";
       action = "Whisper Only";
       summary = "Mahdollinen myyntipuhelu.";
-      nextStep =
-        "⚠️ Ei kiireellinen. Tarkista myöhemmin ennen takaisinsoittoa.";
+      nextStep = "⚠️ Ei kiireellinen. Tarkista myöhemmin ennen takaisinsoittoa.";
     }
 
     if (
@@ -188,10 +238,8 @@ Puhelun teksti:
       risk = 92;
       label = "Scam Risk";
       action = "Block";
-      summary =
-        "Mahdollinen pankkihuijaus. ShieldCall voi ottaa keskustelun haltuun.";
-      nextStep =
-        "🛑 Älä soita takaisin. Tarkista asia suoraan pankin virallisesta numerosta.";
+      summary = "Mahdollinen pankkihuijaus. ShieldCall voi ottaa keskustelun haltuun.";
+      nextStep = "🛑 Älä soita takaisin. Tarkista asia suoraan pankin virallisesta numerosta.";
       personaResponse =
         "Hei. Tämä numero käyttää automaattista huijaustorjuntaa. Keskustelu tallennetaan.";
     }
@@ -286,12 +334,6 @@ app.post("/logout", (req, res) => {
   });
 });
 
-/*
-  Twilio tarvitsee nämä avoimiksi:
-  /voice
-  /gather
-*/
-
 app.post("/voice", async (req, res) => {
   const from = normalizeNumber(req.body.From || "Tuntematon numero");
   const callSid = req.body.CallSid || Date.now().toString();
@@ -309,31 +351,50 @@ app.post("/voice", async (req, res) => {
       action: reputation.action,
       nextStep: reputation.nextStep,
       personaResponse: reputation.personaResponse,
+      forwarded: false,
       createdAt: new Date().toISOString(),
     });
 
     res.type("text/xml");
-    return res.send(`
-<Response>
-  <Say language="fi-FI" voice="alice">
-    Tämä numero käyttää automaattista puhelunsuodatusta. Puhelua ei yhdistetä eteenpäin. Jos asiasi on oikea, lähetä viesti sähköpostitse.
-  </Say>
-  <Hangup/>
-</Response>
-    `);
+    return res.send(
+      buildHangupTwiml(
+        "Tämä numero käyttää automaattista puhelunsuodatusta. Puhelua ei yhdistetä eteenpäin. Jos asiasi on oikea, lähetä viesti sähköpostitse."
+      )
+    );
+  }
+
+  if (reputation && reputation.type === "trusted" && FORWARD_TO_NUMBER) {
+    await addCall({
+      id: callSid,
+      from,
+      status: "Yhdistetään luotettu numero",
+      transcript: "Luotettu numero yhdistettiin ilman esikyselyä.",
+      risk: reputation.risk,
+      label: reputation.label,
+      summary: reputation.summary,
+      action: reputation.action,
+      nextStep: "✅ Puhelu yhdistettiin Mikolle.",
+      personaResponse: "",
+      forwarded: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.type("text/xml");
+    return res.send(buildForwardTwiml("Hei. Yhdistän puhelun Mikolle."));
   }
 
   await addCall({
     id: callSid,
     from,
-    status: reputation && reputation.type === "trusted" ? "Luotettu numero vastasi" : "Puhelu aloitettu",
+    status: "Puhelu aloitettu",
     transcript: "",
-    risk: reputation ? reputation.risk : 0,
-    label: reputation ? reputation.label : "Waiting",
-    summary: reputation ? reputation.summary : "",
-    action: reputation ? reputation.action : "Waiting",
-    nextStep: reputation ? reputation.nextStep : "Odotetaan puheen analyysiä.",
-    personaResponse: reputation ? reputation.personaResponse : "",
+    risk: 0,
+    label: "Waiting",
+    summary: "",
+    action: "Waiting",
+    nextStep: "Odotetaan puheen analyysiä.",
+    personaResponse: "",
+    forwarded: false,
     createdAt: new Date().toISOString(),
   });
 
@@ -376,35 +437,49 @@ app.post("/gather", async (req, res) => {
     analysis = {
       ...reputation,
       summary: `${reputation.summary} Puhelun asia: ${speechResult}`,
-      nextStep: "✅ Luotettu soittaja. Soita takaisin tai päästä jatkossa suoraan läpi.",
+      nextStep: "✅ Luotettu soittaja. Puhelu voidaan yhdistää Mikolle.",
     };
   }
 
+  const forwarded = shouldForward(analysis);
+
   const updated = await updateCall(callSid, {
-    status: "AI hoiti",
+    status: forwarded ? "Yhdistetty Mikolle" : "AI hoiti",
     transcript: speechResult,
     risk: analysis.risk,
     label: analysis.label,
     summary: analysis.summary,
     action: analysis.action,
-    nextStep: analysis.nextStep,
+    nextStep: forwarded ? "✅ Puhelu yhdistettiin Mikolle." : analysis.nextStep,
     personaResponse: analysis.personaResponse,
+    forwarded,
   });
 
   if (!updated) {
     await addCall({
       id: callSid,
       from,
-      status: "AI hoiti",
+      status: forwarded ? "Yhdistetty Mikolle" : "AI hoiti",
       transcript: speechResult,
       risk: analysis.risk,
       label: analysis.label,
       summary: analysis.summary,
       action: analysis.action,
-      nextStep: analysis.nextStep,
+      nextStep: forwarded ? "✅ Puhelu yhdistettiin Mikolle." : analysis.nextStep,
       personaResponse: analysis.personaResponse,
+      forwarded,
       createdAt: new Date().toISOString(),
     });
+  }
+
+  res.type("text/xml");
+
+  if (forwarded) {
+    return res.send(
+      buildForwardTwiml(
+        "Kiitos. Puhelu vaikuttaa turvalliselta. Yhdistän sinut nyt Mikolle."
+      )
+    );
   }
 
   let replyText = "Kiitos. Välitän viestin eteenpäin.";
@@ -417,12 +492,6 @@ app.post("/gather", async (req, res) => {
   if (analysis.action === "Whisper Only") {
     replyText =
       "Kiitos soitosta. Otan viestisi talteen ja välitän sen tarkistettavaksi. Mikko palaa asiaan tarvittaessa.";
-  }
-
-  if (analysis.action === "Pass Through") {
-    replyText = reputation && reputation.type === "trusted"
-      ? "Kiitos soitosta. Välitän viestin Mikolle. Numerosi on merkitty luotetuksi."
-      : "Kiitos soitosta. Välitän viestin Mikolle. Hän palaa asiaan mahdollisuuksien mukaan.";
   }
 
   if (
@@ -439,15 +508,12 @@ app.post("/gather", async (req, res) => {
       "Tämä puhelu on merkitty korkean riskin puheluksi. Puhelua ei yhdistetä eteenpäin.";
   }
 
-  res.type("text/xml");
-  res.send(`
-<Response>
-  <Say language="fi-FI" voice="alice">
-    ${replyText}
-  </Say>
-  <Hangup/>
-</Response>
-  `);
+  if (analysis.action === "Pass Through" && !FORWARD_TO_NUMBER) {
+    replyText =
+      "Kiitos soitosta. Puhelu vaikuttaa turvalliselta, mutta yhdistämistä ei ole vielä asetettu. Välitän viestin Mikolle.";
+  }
+
+  return res.send(buildHangupTwiml(replyText));
 });
 
 app.get("/calls", requireLogin, async (req, res) => {
@@ -468,29 +534,23 @@ app.get("/api/lists", requireLogin, async (req, res) => {
 
 app.post("/clear", requireLogin, async (req, res) => {
   const snap = await db.collection("calls").get();
-
   const batch = db.batch();
   snap.docs.forEach((doc) => batch.delete(doc.ref));
   await batch.commit();
-
   res.redirect("/dashboard");
 });
 
 app.post("/trust-number", requireLogin, async (req, res) => {
   const number = normalizeNumber(req.body.number);
-
   await addNumber("trustedNumbers", number);
   await removeNumber("badNumbers", number);
-
   res.redirect("/dashboard");
 });
 
 app.post("/block-number", requireLogin, async (req, res) => {
   const number = normalizeNumber(req.body.number);
-
   await addNumber("badNumbers", number);
   await removeNumber("trustedNumbers", number);
-
   res.redirect("/dashboard");
 });
 
@@ -519,7 +579,7 @@ app.get("/dashboard", requireLogin, async (req, res) => {
         <div>
           <h1 style="font-size:42px; margin-bottom:8px;">ShieldCall LIVE</h1>
           <p style="font-size:18px; color:#cbd5e1; margin:0;">
-            Realtime AI call screening dashboard.
+            AI call screening dashboard. Yhdistäminen: <b>${FORWARD_TO_NUMBER ? "päällä" : "ei asetettu"}</b>
           </p>
         </div>
 
@@ -606,7 +666,7 @@ app.get("/dashboard", requireLogin, async (req, res) => {
         const total = calls.length;
         const blocked = calls.filter(c => c.action === "Block").length;
         const warned = calls.filter(c => c.action === "Whisper Only").length;
-        const passed = calls.filter(c => c.action === "Pass Through").length;
+        const forwarded = calls.filter(c => c.forwarded).length;
 
         document.getElementById("stats").innerHTML = \`
           <div style="background:white; border-radius:20px; padding:20px;">
@@ -622,8 +682,8 @@ app.get("/dashboard", requireLogin, async (req, res) => {
             <div style="font-size:34px; font-weight:bold; color:#f59e0b;">\${warned}</div>
           </div>
           <div style="background:white; border-radius:20px; padding:20px;">
-            <h3>Luotetut / läpi</h3>
-            <div style="font-size:34px; font-weight:bold; color:#22c55e;">\${passed}</div>
+            <h3>Yhdistetyt</h3>
+            <div style="font-size:34px; font-weight:bold; color:#22c55e;">\${forwarded}</div>
           </div>
         \`;
 
@@ -636,7 +696,7 @@ app.get("/dashboard", requireLogin, async (req, res) => {
         document.getElementById("calls").innerHTML = calls.map(call => {
           let badgeColor = "#22c55e";
           let cardBg = "#f0fdf4";
-          let decision = "✅ Turvallinen / voidaan käsitellä normaalisti";
+          let decision = call.forwarded ? "📞 Yhdistetty Mikolle" : "✅ Turvallinen / voidaan käsitellä normaalisti";
 
           if (call.action === "Whisper Only") {
             badgeColor = "#f59e0b";
@@ -662,7 +722,6 @@ app.get("/dashboard", requireLogin, async (req, res) => {
               <h3 style="margin-top:14px;">\${decision}</h3>
               <p><b>Toiminto:</b> \${esc(call.action || "")}</p>
               <p><b>Seuraava vaihe:</b> \${esc(call.nextStep || "")}</p>
-              <p><b>AI-vastaus:</b> \${esc(call.personaResponse || "—")}</p>
               <p><b>Soittaja:</b> \${esc(call.from || "")}</p>
               <p><b>Status:</b> \${esc(call.status || "")}</p>
               <p><b>Puhelun sisältö:</b> \${esc(call.transcript || "")}</p>
@@ -728,7 +787,7 @@ app.get("/simulate", requireLogin, (req, res) => {
       <input id="from" name="from" value="+358400000000" style="width:100%; padding:10px;"><br><br>
 
       <label>Puheen sisältö:</label><br>
-      <textarea id="transcript" name="transcript" rows="6" style="width:100%; padding:10px;">Hei, tarjoan uutta sähkösopimusta.</textarea><br><br>
+      <textarea id="transcript" name="transcript" rows="6" style="width:100%; padding:10px;">Hei, soitan sovitusta yhteistyöpalaverista ensi viikolle.</textarea><br><br>
 
       <button style="padding:12px 20px;">Simuloi puhelu</button>
     </form>
@@ -737,7 +796,6 @@ app.get("/simulate", requireLogin, (req, res) => {
     <button onclick="demoSafe()">Safe Call</button>
     <button onclick="demoSales()">Sales Call</button>
     <button onclick="demoBankScam()">Bank Scam</button>
-    <button onclick="demoKnownScam()">Known Scam Number</button>
 
     <p><a href="/dashboard">Avaa dashboard</a></p>
 
@@ -755,11 +813,6 @@ app.get("/simulate", requireLogin, (req, res) => {
       function demoBankScam() {
         document.getElementById("from").value = "+358412345777";
         document.getElementById("transcript").value = "Hei pankista, tililläsi on epäilyttävää toimintaa. Anna pankkitunnukset tai tili lukitaan.";
-      }
-
-      function demoKnownScam() {
-        document.getElementById("from").value = "+358401234567";
-        document.getElementById("transcript").value = "Hei, tämä numero löytyy huijauslistalta.";
       }
     </script>
   </body>
@@ -779,21 +832,26 @@ app.post("/simulate", requireLogin, async (req, res) => {
     analysis = {
       ...reputation,
       summary: `${reputation.summary} Puhelun asia: ${transcript}`,
-      nextStep: "✅ Luotettu soittaja. Soita takaisin tai päästä jatkossa suoraan läpi.",
+      nextStep: "✅ Luotettu soittaja. Puhelu voidaan yhdistää Mikolle.",
     };
   }
+
+  const forwarded = shouldForward(analysis);
 
   await addCall({
     id: callSid,
     from,
-    status: reputation && reputation.type === "blocked" ? "Estetty automaattisesti" : "Simuloitu puhelu",
+    status: forwarded ? "Yhdistettäisiin Mikolle" : "Simuloitu puhelu",
     transcript: reputation && reputation.type === "blocked" ? "Numero estetty ennen keskustelua." : transcript,
     risk: analysis.risk,
     label: analysis.label,
     summary: analysis.summary,
     action: analysis.action,
-    nextStep: analysis.nextStep,
+    nextStep: forwarded
+      ? "✅ Oikeassa puhelussa tämä yhdistettäisiin Mikolle."
+      : analysis.nextStep,
     personaResponse: analysis.personaResponse,
+    forwarded,
     createdAt: new Date().toISOString(),
   });
 
