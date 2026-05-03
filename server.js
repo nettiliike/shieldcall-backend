@@ -179,7 +179,8 @@ Puhelun teksti:
       `,
     });
 
-    return JSON.parse(response.output_text);
+    const text = response.output_text;
+return JSON.parse(text);
   } catch (error) {
     console.error("GPT error:", error.message);
 
