@@ -12,9 +12,11 @@ app.post("/voice", (req, res) => {
   res.type("text/xml");
   res.send(`
 <Response>
-  <Say>Hei, tämä on puhelinavustaja. Kerro lyhyesti asiasi.</Say>
+  <Say language="fi-FI" voice="Polly.Suvi">
+  Hei, tämä on puhelinavustaja. Kerro lyhyesti asiasi.
+</Say>
   <Gather input="speech" action="/gather" method="POST">
-    <Say>Puhu nyt.</Say>
+   <Say language="fi-FI" voice="Polly.Suvi">Puhu nyt.</Say>
   </Gather>
 </Response>
   `);
@@ -46,7 +48,7 @@ app.post("/gather", (req, res) => {
   if (safe && FORWARD_TO_NUMBER) {
     return res.send(`
 <Response>
-  <Say>Yhdistän puhelun.</Say>
+  <Say language="fi-FI" voice="Polly.Suvi">Yhdistän puhelun.</Say>
   <Dial>${FORWARD_TO_NUMBER}</Dial>
 </Response>
     `);
@@ -54,7 +56,7 @@ app.post("/gather", (req, res) => {
 
   return res.send(`
 <Response>
-  <Say>Kiitos. Välitän viestin eteenpäin.</Say>
+  <Say language="fi-FI" voice="Polly.Suvi">Kiitos. Välitän viestin eteenpäin.</Say>
   <Hangup/>
 </Response>
   `);
