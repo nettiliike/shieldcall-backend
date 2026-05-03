@@ -632,7 +632,7 @@ app.get("/dashboard", requireLogin, async (req, res) => {
                 </form>
               </div>
             \`).join("")
-          : `<p style="color:#64748b;">${emptyText}</p>`;
+          : '<p style="color:#64748b;">' + emptyText + '</p>';
 
         return \`
           <div style="background:white; border-radius:20px; padding:20px;">
