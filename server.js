@@ -44,43 +44,60 @@ function requireLogin(req, res, next) {
   return res.redirect("/login");
 }
 
+function normalizeNumber(number) {
+  if (!number) return "";
+  return String(number).trim().replace(/\s+/g, "");
+}
+
 async function addNumber(type, number) {
-  if (!number) return;
-  await db.collection(type).doc(number).set({
-    number,
+  const normalized = normalizeNumber(number);
+  if (!normalized) return;
+
+  await db.collection(type).doc(normalized).set({
+    number: normalized,
     updatedAt: new Date().toISOString(),
   });
 }
 
 async function removeNumber(type, number) {
-  if (!number) return;
-  await db.collection(type).doc(number).delete();
+  const normalized = normalizeNumber(number);
+  if (!normalized) return;
+  await db.collection(type).doc(normalized).delete();
+}
+
+async function getNumberList(type) {
+  const snap = await db.collection(type).orderBy("updatedAt", "desc").limit(200).get();
+  return snap.docs.map((doc) => doc.data());
 }
 
 async function checkNumberReputation(from) {
-  const badDoc = await db.collection("badNumbers").doc(from).get();
+  const normalized = normalizeNumber(from);
+
+  const badDoc = await db.collection("badNumbers").doc(normalized).get();
 
   if (badDoc.exists) {
     return {
+      type: "blocked",
       risk: 100,
-      label: "Known Scam Number",
-      summary: "Numero löytyy huijausnumeroiden listalta.",
+      label: "Blocked Number",
+      summary: "Numero löytyy estettyjen numeroiden listalta.",
       action: "Block",
-      nextStep: "🛑 Älä soita takaisin. Numero on tunnettu huijausnumero.",
+      nextStep: "🛑 Numero on estetty. Puhelua ei yhdistetä eteenpäin.",
       personaResponse:
-        "Hei. Tämä numero käyttää automaattista huijaustorjuntaa. Keskustelu tallennetaan.",
+        "Hei. Tämä numero käyttää automaattista puhelunsuodatusta. Puhelua ei yhdistetä eteenpäin.",
     };
   }
 
-  const trustedDoc = await db.collection("trustedNumbers").doc(from).get();
+  const trustedDoc = await db.collection("trustedNumbers").doc(normalized).get();
 
   if (trustedDoc.exists) {
     return {
+      type: "trusted",
       risk: 5,
       label: "Trusted Caller",
       summary: "Numero löytyy luotettujen soittajien listalta.",
       action: "Pass Through",
-      nextStep: "✅ Puhelu voidaan päästää läpi tai soittaa takaisin.",
+      nextStep: "✅ Luotettu numero. Puhelu voidaan päästää läpi tai soittaa takaisin.",
       personaResponse: "",
     };
   }
@@ -276,20 +293,47 @@ app.post("/logout", (req, res) => {
 */
 
 app.post("/voice", async (req, res) => {
-  const from = req.body.From || "Tuntematon numero";
+  const from = normalizeNumber(req.body.From || "Tuntematon numero");
   const callSid = req.body.CallSid || Date.now().toString();
+  const reputation = await checkNumberReputation(from);
+
+  if (reputation && reputation.type === "blocked") {
+    await addCall({
+      id: callSid,
+      from,
+      status: "Estetty automaattisesti",
+      transcript: "Numero estetty ennen keskustelua.",
+      risk: reputation.risk,
+      label: reputation.label,
+      summary: reputation.summary,
+      action: reputation.action,
+      nextStep: reputation.nextStep,
+      personaResponse: reputation.personaResponse,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.type("text/xml");
+    return res.send(`
+<Response>
+  <Say language="fi-FI" voice="alice">
+    Tämä numero käyttää automaattista puhelunsuodatusta. Puhelua ei yhdistetä eteenpäin. Jos asiasi on oikea, lähetä viesti sähköpostitse.
+  </Say>
+  <Hangup/>
+</Response>
+    `);
+  }
 
   await addCall({
     id: callSid,
     from,
-    status: "Puhelu aloitettu",
+    status: reputation && reputation.type === "trusted" ? "Luotettu numero vastasi" : "Puhelu aloitettu",
     transcript: "",
-    risk: 0,
-    label: "Waiting",
-    summary: "",
-    action: "Waiting",
-    nextStep: "Odotetaan puheen analyysiä.",
-    personaResponse: "",
+    risk: reputation ? reputation.risk : 0,
+    label: reputation ? reputation.label : "Waiting",
+    summary: reputation ? reputation.summary : "",
+    action: reputation ? reputation.action : "Waiting",
+    nextStep: reputation ? reputation.nextStep : "Odotetaan puheen analyysiä.",
+    personaResponse: reputation ? reputation.personaResponse : "",
     createdAt: new Date().toISOString(),
   });
 
@@ -321,12 +365,20 @@ app.post("/voice", async (req, res) => {
 });
 
 app.post("/gather", async (req, res) => {
-  const from = req.body.From || "Tuntematon numero";
+  const from = normalizeNumber(req.body.From || "Tuntematon numero");
   const callSid = req.body.CallSid || Date.now().toString();
   const speechResult = req.body.SpeechResult || "Ei transkriptiota.";
 
   const reputation = await checkNumberReputation(from);
-  const analysis = reputation || (await analyzeCallWithGPT(speechResult));
+  let analysis = reputation || (await analyzeCallWithGPT(speechResult));
+
+  if (reputation && reputation.type === "trusted") {
+    analysis = {
+      ...reputation,
+      summary: `${reputation.summary} Puhelun asia: ${speechResult}`,
+      nextStep: "✅ Luotettu soittaja. Soita takaisin tai päästä jatkossa suoraan läpi.",
+    };
+  }
 
   const updated = await updateCall(callSid, {
     status: "AI hoiti",
@@ -368,8 +420,9 @@ app.post("/gather", async (req, res) => {
   }
 
   if (analysis.action === "Pass Through") {
-    replyText =
-      "Kiitos soitosta. Välitän viestin Mikolle. Hän palaa asiaan mahdollisuuksien mukaan.";
+    replyText = reputation && reputation.type === "trusted"
+      ? "Kiitos soitosta. Välitän viestin Mikolle. Numerosi on merkitty luotetuksi."
+      : "Kiitos soitosta. Välitän viestin Mikolle. Hän palaa asiaan mahdollisuuksien mukaan.";
   }
 
   if (
@@ -407,6 +460,12 @@ app.get("/api/calls", requireLogin, async (req, res) => {
   res.json(calls);
 });
 
+app.get("/api/lists", requireLogin, async (req, res) => {
+  const trusted = await getNumberList("trustedNumbers");
+  const blocked = await getNumberList("badNumbers");
+  res.json({ trusted, blocked });
+});
+
 app.post("/clear", requireLogin, async (req, res) => {
   const snap = await db.collection("calls").get();
 
@@ -418,7 +477,7 @@ app.post("/clear", requireLogin, async (req, res) => {
 });
 
 app.post("/trust-number", requireLogin, async (req, res) => {
-  const number = req.body.number;
+  const number = normalizeNumber(req.body.number);
 
   await addNumber("trustedNumbers", number);
   await removeNumber("badNumbers", number);
@@ -427,11 +486,23 @@ app.post("/trust-number", requireLogin, async (req, res) => {
 });
 
 app.post("/block-number", requireLogin, async (req, res) => {
-  const number = req.body.number;
+  const number = normalizeNumber(req.body.number);
 
   await addNumber("badNumbers", number);
   await removeNumber("trustedNumbers", number);
 
+  res.redirect("/dashboard");
+});
+
+app.post("/remove-trusted-number", requireLogin, async (req, res) => {
+  const number = normalizeNumber(req.body.number);
+  await removeNumber("trustedNumbers", number);
+  res.redirect("/dashboard");
+});
+
+app.post("/remove-blocked-number", requireLogin, async (req, res) => {
+  const number = normalizeNumber(req.body.number);
+  await removeNumber("badNumbers", number);
   res.redirect("/dashboard");
 });
 
@@ -475,10 +546,53 @@ app.get("/dashboard", requireLogin, async (req, res) => {
         </form>
       </div>
 
+      <div id="lists" style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:24px;"></div>
       <div id="calls"></div>
     </div>
 
     <script>
+      function esc(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function renderNumberList(title, numbers, removePath, emptyText) {
+        const items = numbers.length
+          ? numbers.map(item => \`
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-top:1px solid #e5e7eb;">
+                <span>\${esc(item.number)}</span>
+                <form method="POST" action="\${removePath}" style="margin:0;">
+                  <input type="hidden" name="number" value="\${esc(item.number)}">
+                  <button style="padding:6px 10px; border-radius:999px; border:none; background:#64748b; color:white; font-weight:bold;">Poista</button>
+                </form>
+              </div>
+            \`).join("")
+          : `<p style="color:#64748b;">${emptyText}</p>`;
+
+        return \`
+          <div style="background:white; border-radius:20px; padding:20px;">
+            <h3 style="margin-top:0;">\${title}</h3>
+            \${items}
+          </div>
+        \`;
+      }
+
+      async function loadLists() {
+        const response = await fetch("/api/lists");
+        if (response.redirected) {
+          window.location.href = response.url;
+          return;
+        }
+        const lists = await response.json();
+        document.getElementById("lists").innerHTML =
+          renderNumberList("Luotetut numerot", lists.trusted || [], "/remove-trusted-number", "Ei vielä luotettuja numeroita.") +
+          renderNumberList("Estetyt numerot", lists.blocked || [], "/remove-blocked-number", "Ei vielä estettyjä numeroita.");
+      }
+
       async function loadCalls() {
         const response = await fetch("/api/calls");
 
@@ -496,88 +610,106 @@ app.get("/dashboard", requireLogin, async (req, res) => {
 
         document.getElementById("stats").innerHTML = \`
           <div style="background:white; border-radius:20px; padding:20px;">
-            <h3>Total Calls</h3>
+            <h3>Puhelut</h3>
             <div style="font-size:34px; font-weight:bold;">\${total}</div>
           </div>
           <div style="background:white; border-radius:20px; padding:20px;">
-            <h3>Blocked</h3>
+            <h3>Estetyt</h3>
             <div style="font-size:34px; font-weight:bold; color:#ef4444;">\${blocked}</div>
           </div>
           <div style="background:white; border-radius:20px; padding:20px;">
-            <h3>Warnings</h3>
+            <h3>Varoitukset</h3>
             <div style="font-size:34px; font-weight:bold; color:#f59e0b;">\${warned}</div>
           </div>
           <div style="background:white; border-radius:20px; padding:20px;">
-            <h3>Passed</h3>
+            <h3>Luotetut / läpi</h3>
             <div style="font-size:34px; font-weight:bold; color:#22c55e;">\${passed}</div>
           </div>
         \`;
 
         if (!calls.length) {
           document.getElementById("calls").innerHTML =
-            '<div style="background:white; padding:30px; border-radius:20px;">No calls yet.</div>';
+            '<div style="background:white; padding:30px; border-radius:20px;">Ei puheluita vielä.</div>';
           return;
         }
 
         document.getElementById("calls").innerHTML = calls.map(call => {
           let badgeColor = "#22c55e";
           let cardBg = "#f0fdf4";
-          let decision = "✅ Safe to pass through";
+          let decision = "✅ Turvallinen / voidaan käsitellä normaalisti";
 
           if (call.action === "Whisper Only") {
             badgeColor = "#f59e0b";
             cardBg = "#fffbeb";
-            decision = "⚠️ Whisper warning recommended";
+            decision = "⚠️ Varoitus: tarkista ennen takaisinsoittoa";
           }
 
           if (call.action === "Block") {
             badgeColor = "#ef4444";
             cardBg = "#fef2f2";
-            decision = "🛑 Blocked by ShieldCall";
+            decision = "🛑 Estetty ShieldCallilla";
           }
 
           return \`
             <div style="background:\${cardBg}; border-radius:22px; padding:22px; margin:18px 0; box-shadow:0 10px 30px rgba(0,0,0,0.08); border:1px solid #e5e7eb;">
               <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h2 style="margin:0;">\${call.label || "Unknown"}</h2>
+                <h2 style="margin:0;">\${esc(call.label || "Tuntematon")}</h2>
                 <span style="background:\${badgeColor}; color:white; padding:8px 14px; border-radius:999px; font-weight:bold;">
-                  Risk \${call.risk ?? 0}/100
+                  Riski \${esc(call.risk ?? 0)}/100
                 </span>
               </div>
 
               <h3 style="margin-top:14px;">\${decision}</h3>
-              <p><b>Action:</b> \${call.action || ""}</p>
-              <p><b>Next Step:</b> \${call.nextStep || ""}</p>
-              <p><b>AI Persona:</b> \${call.personaResponse || "—"}</p>
-              <p><b>Caller:</b> \${call.from || ""}</p>
-              <p><b>Status:</b> \${call.status || ""}</p>
-              <p><b>Transcript:</b> \${call.transcript || ""}</p>
-              <p><b>AI Summary:</b> \${call.summary || ""}</p>
+              <p><b>Toiminto:</b> \${esc(call.action || "")}</p>
+              <p><b>Seuraava vaihe:</b> \${esc(call.nextStep || "")}</p>
+              <p><b>AI-vastaus:</b> \${esc(call.personaResponse || "—")}</p>
+              <p><b>Soittaja:</b> \${esc(call.from || "")}</p>
+              <p><b>Status:</b> \${esc(call.status || "")}</p>
+              <p><b>Puhelun sisältö:</b> \${esc(call.transcript || "")}</p>
+              <p><b>AI-yhteenveto:</b> \${esc(call.summary || "")}</p>
 
-              <div style="margin-top:16px;">
+              <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
                 <form method="POST" action="/trust-number" style="display:inline;">
-                  <input type="hidden" name="number" value="\${call.from}">
+                  <input type="hidden" name="number" value="\${esc(call.from)}">
                   <button style="padding:10px 14px; border-radius:999px; border:none; background:#22c55e; color:white; font-weight:bold;">
                     Merkitse luotetuksi
                   </button>
                 </form>
 
                 <form method="POST" action="/block-number" style="display:inline;">
-                  <input type="hidden" name="number" value="\${call.from}">
-                  <button style="padding:10px 14px; border-radius:999px; border:none; background:#ef4444; color:white; font-weight:bold; margin-left:8px;">
+                  <input type="hidden" name="number" value="\${esc(call.from)}">
+                  <button style="padding:10px 14px; border-radius:999px; border:none; background:#ef4444; color:white; font-weight:bold;">
                     Blokkaa jatkossa
+                  </button>
+                </form>
+
+                <form method="POST" action="/remove-trusted-number" style="display:inline;">
+                  <input type="hidden" name="number" value="\${esc(call.from)}">
+                  <button style="padding:10px 14px; border-radius:999px; border:none; background:#64748b; color:white; font-weight:bold;">
+                    Poista luotetuista
+                  </button>
+                </form>
+
+                <form method="POST" action="/remove-blocked-number" style="display:inline;">
+                  <input type="hidden" name="number" value="\${esc(call.from)}">
+                  <button style="padding:10px 14px; border-radius:999px; border:none; background:#64748b; color:white; font-weight:bold;">
+                    Poista estetyistä
                   </button>
                 </form>
               </div>
 
-              <small style="display:block; margin-top:14px;">\${call.createdAt || ""}</small>
+              <small style="display:block; margin-top:14px;">\${esc(call.createdAt || "")}</small>
             </div>
           \`;
         }).join("");
       }
 
-      loadCalls();
-      setInterval(loadCalls, 2000);
+      async function refresh() {
+        await Promise.all([loadCalls(), loadLists()]);
+      }
+
+      refresh();
+      setInterval(refresh, 2000);
     </script>
   </body>
 </html>
@@ -636,18 +768,26 @@ app.get("/simulate", requireLogin, (req, res) => {
 });
 
 app.post("/simulate", requireLogin, async (req, res) => {
-  const from = req.body.from || "Simuloitu numero";
+  const from = normalizeNumber(req.body.from || "Simuloitu numero");
   const transcript = req.body.transcript || "Ei transkriptiota.";
   const callSid = "SIM-" + Date.now();
 
   const reputation = await checkNumberReputation(from);
-  const analysis = reputation || (await analyzeCallWithGPT(transcript));
+  let analysis = reputation || (await analyzeCallWithGPT(transcript));
+
+  if (reputation && reputation.type === "trusted") {
+    analysis = {
+      ...reputation,
+      summary: `${reputation.summary} Puhelun asia: ${transcript}`,
+      nextStep: "✅ Luotettu soittaja. Soita takaisin tai päästä jatkossa suoraan läpi.",
+    };
+  }
 
   await addCall({
     id: callSid,
     from,
-    status: "Simuloitu puhelu",
-    transcript,
+    status: reputation && reputation.type === "blocked" ? "Estetty automaattisesti" : "Simuloitu puhelu",
+    transcript: reputation && reputation.type === "blocked" ? "Numero estetty ennen keskustelua." : transcript,
     risk: analysis.risk,
     label: analysis.label,
     summary: analysis.summary,
