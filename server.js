@@ -6,7 +6,6 @@ const admin = require('firebase-admin');
 const OpenAI = require('openai');
 
 const app = express();
-
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
@@ -17,7 +16,6 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Firebase init
 function initFirebase() {
   if (admin.apps.length) return;
 
@@ -42,12 +40,12 @@ function maskPhone(number = '') {
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
-  } catch (error) {
+  } catch {
     const match = text.match(/\{[\s\S]*\}/);
     if (match) {
       try {
         return JSON.parse(match[0]);
-      } catch (e) {
+      } catch {
         return null;
       }
     }
@@ -76,14 +74,8 @@ Palauta VAIN validi JSON tässä muodossa:
     model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
     temperature: 0.2,
     messages: [
-      {
-        role: 'system',
-        content: 'Vastaa aina pelkkänä validina JSONina. Älä käytä markdownia.',
-      },
-      {
-        role: 'user',
-        content: prompt,
-      },
+      { role: 'system', content: 'Vastaa aina pelkkänä validina JSONina. Älä käytä markdownia.' },
+      { role: 'user', content: prompt },
     ],
   });
 
@@ -100,12 +92,132 @@ Palauta VAIN validi JSON tässä muodossa:
   };
 }
 
-// Health check
+function formatDate(value) {
+  if (!value) return '';
+  if (value.toDate) return value.toDate().toLocaleString('fi-FI');
+  return String(value);
+}
+
 app.get('/', (req, res) => {
   res.send('AI Puhelinvastaaja backend toimii ✅');
 });
 
-// Twilio: puhelu alkaa
+app.get('/dashboard', async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection(COLLECTION)
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+
+    const rows = snapshot.docs.map(doc => {
+      const d = doc.data();
+      const risk = Number(d.spamRisk || 0);
+
+      return `
+        <div class="card ${d.type === 'ai_voicemail_error' ? 'error' : ''}">
+          <div class="top">
+            <h2>${d.category || 'Ei luokitusta'}</h2>
+            <span class="risk">Riski ${risk}/100</span>
+          </div>
+
+          <p><b>Aika:</b> ${formatDate(d.createdAt)}</p>
+          <p><b>Soittaja:</b> ${d.fromMasked || maskPhone(d.from) || 'Tuntematon'}</p>
+          <p><b>Nimi:</b> ${d.callerName || 'Tuntematon'}</p>
+          <p><b>Kiireellisyys:</b> ${d.priority || '-'}</p>
+          <p><b>Suositus:</b> ${d.recommendedAction || '-'}</p>
+          <p><b>Yhteenveto:</b> ${d.summary || '-'}</p>
+          <p><b>Puheen sisältö:</b> ${d.transcript || '-'}</p>
+          ${d.error ? `<p class="err"><b>Virhe:</b> ${d.error}</p>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    res.send(`
+      <!doctype html>
+      <html lang="fi">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>AI Puhelinvastaaja Dashboard</title>
+        <style>
+          body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0f172a;
+            color: #111827;
+          }
+          header {
+            background: #111827;
+            color: white;
+            padding: 24px;
+            text-align: center;
+          }
+          main {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 24px;
+          }
+          .card {
+            background: #dcfce7;
+            border-radius: 18px;
+            padding: 22px;
+            margin-bottom: 18px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+          }
+          .card.error {
+            background: #fee2e2;
+          }
+          .top {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+          }
+          h1, h2 {
+            margin: 0;
+          }
+          h2 {
+            font-size: 26px;
+          }
+          p {
+            font-size: 17px;
+            line-height: 1.45;
+          }
+          .risk {
+            background: #16a34a;
+            color: white;
+            padding: 10px 16px;
+            border-radius: 999px;
+            font-weight: bold;
+          }
+          .err {
+            color: #991b1b;
+          }
+          .empty {
+            background: white;
+            padding: 24px;
+            border-radius: 14px;
+          }
+        </style>
+      </head>
+      <body>
+        <header>
+          <h1>AI Puhelinvastaaja Dashboard</h1>
+          <p>Viimeisimmät puhelut ja AI-yhteenvedot</p>
+        </header>
+        <main>
+          ${rows || '<div class="empty">Ei puheluita vielä.</div>'}
+        </main>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).send('Dashboardin lataus epäonnistui: ' + error.message);
+  }
+});
+
 app.post('/voice', (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
@@ -134,7 +246,6 @@ app.post('/voice', (req, res) => {
   res.send(twiml.toString());
 });
 
-// Twilio: puhe käsitellään
 app.post('/voice/process', async (req, res) => {
   const speechResult = req.body.SpeechResult || '';
   const caller = req.body.From || 'Tuntematon';
@@ -143,10 +254,8 @@ app.post('/voice/process', async (req, res) => {
 
   console.log('Puhe vastaanotettu:', speechResult);
 
-  let analysis;
-
   try {
-    analysis = await analyzeCall(speechResult);
+    const analysis = await analyzeCall(speechResult);
 
     await db.collection(COLLECTION).add({
       type: 'ai_voicemail',
@@ -164,31 +273,25 @@ app.post('/voice/process', async (req, res) => {
       action: 'AI vastaanotti viestin',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    console.log('Puhelu tallennettu Firestoreen.');
   } catch (error) {
     console.error('Puhelun analysointi/tallennus epäonnistui:', error);
 
-    try {
-      await db.collection(COLLECTION).add({
-        type: 'ai_voicemail_error',
-        callSid,
-        from: caller,
-        fromMasked: maskPhone(caller),
-        toNumber: called,
-        transcript: speechResult,
-        summary: speechResult || 'Puhelun analysointi epäonnistui.',
-        category: 'epäselvä',
-        priority: 'matala',
-        recommendedAction: 'tarkista varoen',
-        spamRisk: 50,
-        error: String(error.message || error),
-        action: 'Virhe analyysissä',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-    } catch (dbError) {
-      console.error('Virheen tallennus Firestoreen epäonnistui:', dbError);
-    }
+    await db.collection(COLLECTION).add({
+      type: 'ai_voicemail_error',
+      callSid,
+      from: caller,
+      fromMasked: maskPhone(caller),
+      toNumber: called,
+      transcript: speechResult,
+      summary: speechResult || 'Puhelun analysointi epäonnistui.',
+      category: 'epäselvä',
+      priority: 'matala',
+      recommendedAction: 'tarkista varoen',
+      spamRisk: 50,
+      error: String(error.message || error),
+      action: 'Virhe analyysissä',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
   }
 
   const twiml = new twilio.twiml.VoiceResponse();
