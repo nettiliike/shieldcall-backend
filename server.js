@@ -133,35 +133,26 @@ app.post('/voice', (req, res) => {
 });
 
 // Twilio sends speech result here
+app.post('/voice', (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+
+  twiml.say(
+    { language: 'fi-FI' },
+    'Hei, tavoitit puhelinassistentin. Kerro nimesi ja asiasi lyhyesti.'
+  );
+
+  twiml.pause({ length: 2 });
+
+  twiml.say(
+    { language: 'fi-FI' },
+    'Kiitos, palaamme asiaan pian.'
+  );
+
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
+
 app.post('/voice/process', async (req, res) => {
-  const caller = req.body.From || '';
-  const called = req.body.To || '';
-  const callSid = req.body.CallSid || '';
-  const speechResult = req.body.SpeechResult || '';
-  const confidence = req.body.Confidence || null;
-
-  let analysis;
-
-  try {
-    analysis = await analyzeCall({ speechResult, caller });
-
-    await db.collection(COLLECTION).add({
-      type: 'ai_voicemail',
-      callSid,
-      fromMasked: maskPhone(caller),
-      fromRaw: process.env.STORE_RAW_CALLER === 'true' ? caller : null,
-      toNumber: called,
-      transcript: process.env.STORE_TRANSCRIPT === 'true' ? speechResult : null,
-      transcriptPreview: speechResult ? speechResult.slice(0, 500) : '',
-      callerName: analysis.callerName || 'Tuntematon',
-      summary: analysis.summary || 'Ei yhteenvetoa.',
-      category: analysis.category || 'epäselvä',
-      priority: analysis.priority || 'matala',
-      recommendedAction: analysis.recommendedAction || 'tarkista varoen',
-      spamRisk: Number(analysis.spamRisk ?? 50),
-      speechConfidence: confidence,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
   } catch (error) {
     console.error('Call processing failed:', error);
 
