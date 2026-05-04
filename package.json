@@ -1,18 +1,15 @@
 {
-  "name": "shieldcall-backend",
+  "name": "ai-puhelinvastaaja-backend",
   "version": "1.0.0",
   "main": "server.js",
-  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^4.18.3",
-    "express-session": "^1.19.0",
-    "firebase-admin": "^13.8.0",
-    "openai": "^6.35.0"
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.2",
+    "openai": "^4.77.0",
+    "twilio": "^5.4.1"
   }
 }
