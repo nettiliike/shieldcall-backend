@@ -102,17 +102,24 @@ app.get('/', (req, res) => {
 });
 
 // Twilio Voice webhook: A Call Comes In
-app.post('/voice', async (req, res) => {
+app.post('/voice', (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  const gather = twiml.gather({
-    input: 'speech',
-    language: 'fi-FI',
-    speechTimeout: 'auto',
-    timeout: 5,
-    action: '/voice/process',
-    method: 'POST',
-  });
+  twiml.say(
+    { language: 'fi-FI' },
+    'Hei, tavoitit puhelinassistentin. Kerro nimesi ja asiasi lyhyesti.'
+  );
+
+  twiml.pause({ length: 2 });
+
+  twiml.say(
+    { language: 'fi-FI' },
+    'Kiitos, palaamme asiaan pian.'
+  );
+
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
 
   gather.say({ language: 'fi-FI', voice: 'Polly.Suvi' },
     'Hei. Tavoitit puhelinassistentin. Henkilö ei pääse juuri nyt vastaamaan, mutta voin välittää viestin. Kerro lyhyesti nimesi ja mitä asia koskee.'
