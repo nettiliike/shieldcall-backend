@@ -122,7 +122,7 @@ app.get('/dashboard', async (req, res) => {
           </div>
 
           <p><b>Aika:</b> ${formatDate(d.createdAt)}</p>
-          <p><b>Soittaja:</b> ${d.fromMasked || maskPhone(d.from) || 'Tuntematon'}</p>
+          <p><b>Soittaja:</b> ${d.from || d.fromMasked || 'Tuntematon'}</p>
           <p><b>Nimi:</b> ${d.callerName || 'Tuntematon'}</p>
           <p><b>Kiireellisyys:</b> ${d.priority || '-'}</p>
           <p><b>Suositus:</b> ${d.recommendedAction || '-'}</p>
