@@ -206,6 +206,11 @@ app.get('/dashboard', async (req, res) => {
           <h1>AI Puhelinvastaaja Dashboard</h1>
           <p>Viimeisimmät puhelut ja AI-yhteenvedot</p>
         </header>
+        <form method="POST" action="/dashboard/clear" style="text-align:center; margin: 20px;">
+  <button type="submit" onclick="return confirm('Haluatko varmasti pyyhkiä logit?')">
+    Pyyhi logi
+  </button>
+</form>
         <main>
           ${rows || '<div class="empty">Ei puheluita vielä.</div>'}
         </main>
@@ -221,18 +226,19 @@ app.get('/dashboard', async (req, res) => {
 app.post('/voice', (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  const gather = twiml.gather({
-    input: 'speech',
-    language: 'fi-FI',
-    speechTimeout: 'auto',
-    timeout: 6,
-    action: '/voice/process',
-    method: 'POST',
-  });
+const gather = twiml.gather({
+  input: 'speech',
+  language: 'fi-FI',
+  speechTimeout: 'auto',
+  timeout: 5,
+  action: '/voice/process',
+  method: 'POST',
+  maxSpeechTime: 30,
+});
 
   gather.say(
     { language: 'fi-FI' },
-    'Hei, tavoitit puhelinassistentin. Henkilö ei pääse juuri nyt vastaamaan. Kerro nimesi ja asiasi lyhyesti, niin välitän viestin eteenpäin.'
+    'Hei, olen Mikon puhelinassistentin. Mikko ei pääse juuri nyt vastaamaan. Kerro nimesi ja asiasi lyhyesti, niin välitän viestin eteenpäin.'
   );
 
   twiml.say(
@@ -305,6 +311,23 @@ app.post('/voice/process', async (req, res) => {
 
   res.type('text/xml');
   res.send(twiml.toString());
+});
+app.post('/dashboard/clear', async (req, res) => {
+  try {
+    const snapshot = await db.collection(COLLECTION).limit(100).get();
+
+    const batch = db.batch();
+    snapshot.docs.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    await batch.commit();
+
+    res.redirect('/dashboard');
+  } catch (error) {
+    console.error('Logien poisto epäonnistui:', error);
+    res.status(500).send('Logien poisto epäonnistui: ' + error.message);
+  }
 });
 
 app.listen(PORT, () => {
