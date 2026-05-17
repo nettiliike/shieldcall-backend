@@ -100,7 +100,9 @@ Luokittele myynniksi tai huijaukseksi vain jos siihen on selkeä syy.
 app.get('/', (req, res) => {
   res.send('AI Puhelinvastaaja backend toimii ✅');
 });
-
+app.get('/dashboard', (req, res) => {
+  res.sendFile(__dirname + '/dashboard-ai-voicemail.html');
+});
 // Twilio Voice webhook: A Call Comes In
 app.post('/voice', async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
