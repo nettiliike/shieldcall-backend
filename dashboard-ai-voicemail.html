@@ -4,21 +4,155 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI Puhelinvastaaja - Dashboard</title>
+
   <style>
-    body { font-family: Arial, sans-serif; background:#f5f7fb; margin:0; padding:24px; color:#111827; }
-    .wrap { max-width: 980px; margin:0 auto; }
-    h1 { margin-bottom: 6px; }
-    .muted { color:#6b7280; margin-bottom:24px; }
-    .card { background:white; border-radius:16px; padding:18px; margin-bottom:14px; box-shadow:0 6px 24px rgba(0,0,0,.07); }
-    .row { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
-    .badge { display:inline-block; padding:5px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
-    .high { background:#fee2e2; }
-    .mid { background:#fef3c7; }
-    .low { background:#dcfce7; }
-    .summary { font-size:17px; margin:12px 0; }
-    .small { font-size:13px; color:#6b7280; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      margin: 0;
+      padding: 28px;
+      color: #111827;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      color: white;
+      margin-bottom: 6px;
+      font-size: 38px;
+    }
+
+    .muted {
+      color: #cbd5e1;
+      margin-bottom: 28px;
+      font-size: 18px;
+    }
+
+    .card {
+      background: #dcfce7;
+      border-radius: 22px;
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      position: relative;
+    }
+
+    .card.high-risk {
+      background: #fee2e2;
+    }
+
+    .card.mid-risk {
+      background: #fef3c7;
+    }
+
+    .card.low-risk {
+      background: #dcfce7;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      font-size: 30px;
+      font-weight: 800;
+      margin: 0;
+    }
+
+    .risk {
+      background: #16a34a;
+      color: white;
+      padding: 13px 22px;
+      border-radius: 999px;
+      font-weight: 800;
+      font-size: 18px;
+      white-space: nowrap;
+    }
+
+    .risk.high {
+      background: #dc2626;
+    }
+
+    .risk.mid {
+      background: #f59e0b;
+    }
+
+    .line {
+      font-size: 19px;
+      margin: 18px 0;
+      line-height: 1.45;
+    }
+
+    .line strong {
+      font-weight: 800;
+    }
+
+    .buttons {
+      margin-top: 26px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    button, .call-link {
+      border: none;
+      padding: 13px 20px;
+      border-radius: 999px;
+      color: white;
+      font-size: 16px;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .blue { background: #2563eb; }
+    .green { background: #16a34a; }
+    .red { background: #dc2626; }
+    .orange { background: #f59e0b; }
+
+    .empty {
+      background: white;
+      border-radius: 18px;
+      padding: 22px;
+      font-size: 18px;
+    }
+
+    @media (max-width: 700px) {
+      body {
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 30px;
+      }
+
+      .top {
+        flex-direction: column;
+      }
+
+      .card {
+        padding: 22px;
+      }
+
+      .title {
+        font-size: 24px;
+      }
+
+      .line {
+        font-size: 17px;
+      }
+    }
   </style>
 </head>
+
 <body>
   <div class="wrap">
     <h1>AI Puhelinvastaaja</h1>
@@ -39,10 +173,20 @@
       }[c]));
     }
 
-    function priorityClass(p) {
-      if (p === 'korkea') return 'high';
-      if (p === 'keskitaso') return 'mid';
-      return 'low';
+    function getRisk(d) {
+      return Number(d.spamRisk ?? d.riskScore ?? d.risk ?? 0);
+    }
+
+    function riskClass(risk) {
+      if (risk >= 70) return 'high-risk';
+      if (risk >= 35) return 'mid-risk';
+      return 'low-risk';
+    }
+
+    function riskBadgeClass(risk) {
+      if (risk >= 70) return 'high';
+      if (risk >= 35) return 'mid';
+      return '';
     }
 
     function formatDate(createdAt) {
@@ -61,42 +205,56 @@
       return '';
     }
 
+    function fullPhone(d) {
+      return d.from || d.phone || d.callerNumber || d.number || d.fromMasked || 'Tuntematon';
+    }
+
     async function loadCalls() {
       try {
         const res = await fetch('/api/calls');
         const calls = await res.json();
 
         if (!Array.isArray(calls) || calls.length === 0) {
-          el.innerHTML = '<div class="card">Ei puheluita vielä.</div>';
+          el.innerHTML = '<div class="empty">Ei puheluita vielä.</div>';
           return;
         }
 
         el.innerHTML = calls.map(d => {
-          const date = formatDate(d.createdAt);
+          const risk = getRisk(d);
+          const phone = fullPhone(d);
+          const telLink = phone && phone !== 'Tuntematon'
+            ? `tel:${String(phone).replace(/\s/g, '')}`
+            : '#';
 
           return `
-            <div class="card">
-              <div class="row">
-                <div>
-                  <strong>📞 ${esc(d.fromMasked || d.from || d.phone || 'Tuntematon')}</strong>
-                  <div class="small">${esc(date)}</div>
-                </div>
-                <div>
-                  <span class="badge ${priorityClass(d.priority)}">${esc(d.priority || 'matala')}</span>
-                  <span class="badge">${esc(d.category || 'epäselvä')}</span>
-                </div>
+            <div class="card ${riskClass(risk)}">
+              <div class="top">
+                <h2 class="title">${esc(d.category || d.label || 'Epäselvä')}</h2>
+                <div class="risk ${riskBadgeClass(risk)}">Riski ${esc(risk)}/100</div>
               </div>
 
-              <div class="summary">🧠 ${esc(d.summary || d.aiSummary || 'Ei yhteenvetoa')}</div>
+              <div class="line"><strong>Status:</strong> ${esc(d.status || 'new')}</div>
+              <div class="line"><strong>Aika:</strong> ${esc(formatDate(d.createdAt))}</div>
+              <div class="line"><strong>Soittaja:</strong> ${esc(phone)}</div>
+              <div class="line"><strong>Nimi:</strong> ${esc(d.callerName || d.name || 'Tuntematon')}</div>
+              <div class="line"><strong>Kiireellisyys:</strong> ${esc(d.priority || d.urgency || 'keskitaso')}</div>
+              <div class="line"><strong>Suositus:</strong> ${esc(d.recommendedAction || d.action || 'tarkista')}</div>
+              <div class="line"><strong>Yhteenveto:</strong> ${esc(d.summary || d.aiSummary || 'Ei yhteenvetoa')}</div>
+              <div class="line"><strong>Riskin syy:</strong> ${esc(d.riskReason || d.reason || 'Ei riskiselitettä')}</div>
+              <div class="line"><strong>Puheen sisältö:</strong> ${esc(d.transcript || d.message || d.speechText || d.userSpeech || 'Ei puhesisältöä')}</div>
 
-              <div><strong>Suositus:</strong> ${esc(d.recommendedAction || d.action || 'tarkista')}</div>
-              <div class="small">Spam-risk: ${esc(d.spamRisk ?? d.riskScore ?? '-')} / 100</div>
+              <div class="buttons">
+                <a class="call-link blue" href="${esc(telLink)}">Soita takaisin</a>
+                <button class="green">Merkitse hoidetuksi</button>
+                <button class="red">Estä jatkossa</button>
+                <button class="orange">Tallenna luotetuksi</button>
+              </div>
             </div>
           `;
         }).join('');
       } catch (err) {
         console.error(err);
-        el.innerHTML = '<div class="card">Dashboardin lataus epäonnistui.</div>';
+        el.innerHTML = '<div class="empty">Dashboardin lataus epäonnistui.</div>';
       }
     }
 
