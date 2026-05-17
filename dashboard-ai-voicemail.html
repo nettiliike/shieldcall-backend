@@ -31,6 +31,77 @@
       font-size: 18px;
     }
 
+    .settings {
+      background: white;
+      border-radius: 22px;
+      padding: 24px;
+      margin-bottom: 28px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+
+    .settings h2 {
+      margin-top: 0;
+      font-size: 26px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+
+    .reply-box {
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 16px;
+      background: #f8fafc;
+    }
+
+    label {
+      font-weight: 800;
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 12px;
+      font-size: 16px;
+      margin-bottom: 12px;
+      font-family: Arial, sans-serif;
+    }
+
+    textarea {
+      min-height: 95px;
+      resize: vertical;
+    }
+
+    .active-row {
+      margin: 12px 0 18px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .active-option {
+      background: #eef2ff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .save-status {
+      margin-top: 12px;
+      color: #475569;
+      font-weight: 700;
+    }
+
     .card {
       background: #dcfce7;
       border-radius: 22px;
@@ -117,6 +188,7 @@
     .green { background: #16a34a; }
     .red { background: #dc2626; }
     .orange { background: #f59e0b; }
+    .dark { background: #0f172a; }
 
     .empty {
       background: white;
@@ -138,7 +210,7 @@
         flex-direction: column;
       }
 
-      .card {
+      .card, .settings {
         padding: 22px;
       }
 
@@ -156,12 +228,83 @@
 <body>
   <div class="wrap">
     <h1>AI Puhelinvastaaja</h1>
-    <div class="muted">Viimeisimmät puhelut ja yhteenvedot</div>
+    <div class="muted">Viimeisimmät puhelut, yhteenvedot ja vastaustavat</div>
+
+    <div class="settings">
+      <h2>Assistentin vastaustapa</h2>
+      <p>Valitse aktiivinen vastaustapa ja muokkaa tekstiä, jonka puhelinassistentti sanoo soittajalle.</p>
+
+      <div class="active-row">
+        <label class="active-option">
+          <input type="radio" name="activeReply" value="reply1">
+          <span id="reply1RadioName">Vastaus 1</span>
+        </label>
+
+        <label class="active-option">
+          <input type="radio" name="activeReply" value="reply2">
+          <span id="reply2RadioName">Vastaus 2</span>
+        </label>
+
+        <label class="active-option">
+          <input type="radio" name="activeReply" value="reply3">
+          <span id="reply3RadioName">Vastaus 3</span>
+        </label>
+      </div>
+
+      <div class="settings-grid">
+        <div class="reply-box">
+          <label>Vastaustavan nimi 1</label>
+          <input id="reply1Name" placeholder="Esim. Palaveri">
+          <label>Vastausviesti 1</label>
+          <textarea id="reply1Message" placeholder="Mitä assistentti sanoo soittajalle?"></textarea>
+        </div>
+
+        <div class="reply-box">
+          <label>Vastaustavan nimi 2</label>
+          <input id="reply2Name" placeholder="Esim. Reissussa">
+          <label>Vastausviesti 2</label>
+          <textarea id="reply2Message" placeholder="Mitä assistentti sanoo soittajalle?"></textarea>
+        </div>
+
+        <div class="reply-box">
+          <label>Vastaustavan nimi 3</label>
+          <input id="reply3Name" placeholder="Esim. Yleinen">
+          <label>Vastausviesti 3</label>
+          <textarea id="reply3Message" placeholder="Mitä assistentti sanoo soittajalle?"></textarea>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button class="dark" onclick="saveSettings()">Tallenna vastaustavat</button>
+      </div>
+
+      <div id="settingsStatus" class="save-status"></div>
+    </div>
+
     <div id="calls">Ladataan...</div>
   </div>
 
   <script>
     const el = document.getElementById('calls');
+    const settingsStatus = document.getElementById('settingsStatus');
+
+    const defaultSettings = {
+      activeReply: 'reply1',
+      replies: {
+        reply1: {
+          name: 'Palaveri',
+          message: 'Hei, olen juuri palaverissa. Kerro lyhyesti nimesi ja asiasi, niin välitän viestin eteenpäin.'
+        },
+        reply2: {
+          name: 'Reissussa',
+          message: 'Hei, olen tällä hetkellä reissussa enkä pääse vastaamaan. Kerro lyhyesti nimesi ja asiasi, niin palaan asiaan myöhemmin.'
+        },
+        reply3: {
+          name: 'Yleinen',
+          message: 'Hei, olet yhteydessä tekoälyavustajaan. Kerro lyhyesti nimesi ja asiasi.'
+        }
+      }
+    };
 
     function esc(v) {
       return String(v ?? '').replace(/[&<>'"]/g, c => ({
@@ -207,6 +350,109 @@
 
     function fullPhone(d) {
       return d.from || d.phone || d.callerNumber || d.number || d.fromMasked || 'Tuntematon';
+    }
+
+    function setValue(id, value) {
+      const item = document.getElementById(id);
+      if (item) item.value = value || '';
+    }
+
+    function setText(id, value) {
+      const item = document.getElementById(id);
+      if (item) item.textContent = value || '';
+    }
+
+    function getActiveReply() {
+      const selected = document.querySelector('input[name="activeReply"]:checked');
+      return selected ? selected.value : 'reply1';
+    }
+
+    function updateRadioNames() {
+      setText('reply1RadioName', document.getElementById('reply1Name').value || 'Vastaus 1');
+      setText('reply2RadioName', document.getElementById('reply2Name').value || 'Vastaus 2');
+      setText('reply3RadioName', document.getElementById('reply3Name').value || 'Vastaus 3');
+    }
+
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        const data = res.ok ? await res.json() : defaultSettings;
+        const settings = {
+          ...defaultSettings,
+          ...data,
+          replies: {
+            ...defaultSettings.replies,
+            ...(data.replies || {})
+          }
+        };
+
+        setValue('reply1Name', settings.replies.reply1.name);
+        setValue('reply1Message', settings.replies.reply1.message);
+
+        setValue('reply2Name', settings.replies.reply2.name);
+        setValue('reply2Message', settings.replies.reply2.message);
+
+        setValue('reply3Name', settings.replies.reply3.name);
+        setValue('reply3Message', settings.replies.reply3.message);
+
+        const active = settings.activeReply || 'reply1';
+        const radio = document.querySelector(`input[name="activeReply"][value="${active}"]`);
+        if (radio) radio.checked = true;
+
+        updateRadioNames();
+      } catch (err) {
+        console.error(err);
+        settingsStatus.textContent = 'Asetusten lataus ei vielä toimi. Lisää seuraavaksi server.js asetusten tallennukselle.';
+        setValue('reply1Name', defaultSettings.replies.reply1.name);
+        setValue('reply1Message', defaultSettings.replies.reply1.message);
+        setValue('reply2Name', defaultSettings.replies.reply2.name);
+        setValue('reply2Message', defaultSettings.replies.reply2.message);
+        setValue('reply3Name', defaultSettings.replies.reply3.name);
+        setValue('reply3Message', defaultSettings.replies.reply3.message);
+        document.querySelector('input[name="activeReply"][value="reply1"]').checked = true;
+        updateRadioNames();
+      }
+    }
+
+    async function saveSettings() {
+      updateRadioNames();
+
+      const payload = {
+        activeReply: getActiveReply(),
+        replies: {
+          reply1: {
+            name: document.getElementById('reply1Name').value,
+            message: document.getElementById('reply1Message').value
+          },
+          reply2: {
+            name: document.getElementById('reply2Name').value,
+            message: document.getElementById('reply2Message').value
+          },
+          reply3: {
+            name: document.getElementById('reply3Name').value,
+            message: document.getElementById('reply3Message').value
+          }
+        }
+      };
+
+      try {
+        settingsStatus.textContent = 'Tallennetaan...';
+
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) throw new Error('Tallennus epäonnistui');
+
+        settingsStatus.textContent = 'Tallennettu ✅';
+      } catch (err) {
+        console.error(err);
+        settingsStatus.textContent = 'Tallennus epäonnistui. Lisää seuraavaksi server.js asetusten tallennukselle.';
+      }
     }
 
     async function loadCalls() {
@@ -258,6 +504,9 @@
       }
     }
 
+    document.addEventListener('input', updateRadioNames);
+
+    loadSettings();
     loadCalls();
   </script>
 </body>
