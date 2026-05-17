@@ -183,7 +183,25 @@ app.post('/voice/process', async (req, res) => {
 
   res.type('text/xml').send(twiml.toString());
 });
+app.get('/api/calls', async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection(COLLECTION)
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
 
+    const calls = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    res.json(calls);
+  } catch (error) {
+    console.error('Virhe puheluiden haussa:', error);
+    res.status(500).json({ error: 'Puheluiden haku epäonnistui' });
+  }
+});
 app.listen(PORT, () => {
   console.log(`AI Puhelinvastaaja backend käynnissä portissa ${PORT}`);
 });
