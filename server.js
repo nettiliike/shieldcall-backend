@@ -1,207 +1,286 @@
-require('dotenv').config();
-
-const express = require('express');
-const twilio = require('twilio');
-const admin = require('firebase-admin');
-const OpenAI = require('openai');
+const express = require("express");
+const twilio = require("twilio");
+const admin = require("firebase-admin");
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const COLLECTION = process.env.FIRESTORE_COLLECTION || 'calls';
 
-// --- OpenAI ---
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// --- Firebase Admin ---
-function initFirebase() {
-  if (admin.apps.length) return;
+// Firebase
+if (!admin.apps.length) {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    return;
-  }
-
-  // Works on Google/Firebase hosting environments with default credentials.
-  admin.initializeApp();
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
 }
 
-initFirebase();
 const db = admin.firestore();
+const COLLECTION = "calls";
 
-function maskPhone(number = '') {
-  if (!number) return 'Tuntematon';
-  // Keep beginning and last 2 digits visible: +35840*****67
-  return number.replace(/(\+?\d{3,6})\d+(\d{2})$/, '$1*****$2');
-}
-
-function normalizeJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      try { return JSON.parse(match[0]); } catch (_) {}
-    }
-    return null;
-  }
-}
-
-async function analyzeCall({ speechResult, caller }) {
-  const prompt = `
-Olet suomalaisen AI-puhelinvastaajan analyysimoottori.
-Soittaja kertoi seuraavan asian:
-"""
-${speechResult || ''}
-"""
-
-Palauta VAIN validi JSON seuraavilla kentillä:
-{
-  "callerName": "soittajan nimi jos ilmenee, muuten Tuntematon",
-  "summary": "1-2 virkkeen suomenkielinen yhteenveto",
-  "category": "tärkeä | normaali | myynti | huijaus | epäselvä",
-  "priority": "korkea | keskitaso | matala",
-  "recommendedAction": "soita takaisin heti | soita takaisin myöhemmin | ei vaadi toimenpidettä | tarkista varoen",
-  "spamRisk": 0-100
-}
-
-Luokittele tärkeäksi, jos asia vaikuttaa asiakkaalta, työasialta, varaukselta, tarjoukselta, toimitukselta, laskulta tai kiireelliseltä henkilökohtaiselta asialta.
-Luokittele myynniksi tai huijaukseksi vain jos siihen on selkeä syy.
-`;
-
-  const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-    temperature: 0.2,
-    messages: [
-      { role: 'system', content: 'Vastaa aina pelkkänä JSONina. Ei markdownia.' },
-      { role: 'user', content: prompt }
-    ],
-  });
-
-  const content = completion.choices?.[0]?.message?.content || '{}';
-  const parsed = normalizeJson(content);
-
-  return parsed || {
-    callerName: 'Tuntematon',
-    summary: speechResult ? speechResult.slice(0, 220) : 'Soittaja ei jättänyt selkeää viestiä.',
-    category: 'epäselvä',
-    priority: 'matala',
-    recommendedAction: 'tarkista varoen',
-    spamRisk: 50,
-  };
-}
-
-// Health check
-app.get('/', (req, res) => {
-  res.send('AI Puhelinvastaaja backend toimii ✅');
-});
-app.get('/dashboard', (req, res) => {
-  res.sendFile(__dirname + '/dashboard-ai-voicemail.html');
-});
-// Twilio Voice webhook: A Call Comes In
-app.post('/voice', async (req, res) => {
-  const twiml = new twilio.twiml.VoiceResponse();
-
-  const gather = twiml.gather({
-    input: 'speech',
-    language: 'fi-FI',
-    speechTimeout: 'auto',
-    timeout: 5,
-    action: '/voice/process',
-    method: 'POST',
-  });
-
-  gather.say({ language: 'fi-FI', voice: 'Polly.Suvi' },
-    'Hei. Tavoitit puhelinassistentin. Henkilö ei pääse juuri nyt vastaamaan, mutta voin välittää viestin. Kerro lyhyesti nimesi ja mitä asia koskee.'
-  );
-
-  twiml.say({ language: 'fi-FI', voice: 'Polly.Suvi' },
-    'En valitettavasti kuullut viestiä. Voit yrittää myöhemmin uudelleen. Kiitos soitosta.'
-  );
-
-  res.type('text/xml').send(twiml.toString());
+// Etusivu
+app.get("/", (req, res) => {
+  res.send("AI Puhelinvastaaja backend toimii ✅");
 });
 
-// Twilio sends speech result here
-app.post('/voice/process', async (req, res) => {
-  const caller = req.body.From || '';
-  const called = req.body.To || '';
-  const callSid = req.body.CallSid || '';
-  const speechResult = req.body.SpeechResult || '';
-  const confidence = req.body.Confidence || null;
-
-  let analysis;
-
-  try {
-    analysis = await analyzeCall({ speechResult, caller });
-
-    await db.collection(COLLECTION).add({
-      type: 'ai_voicemail',
-      callSid,
-      fromMasked: maskPhone(caller),
-      fromRaw: process.env.STORE_RAW_CALLER === 'true' ? caller : null,
-      toNumber: called,
-      transcript: process.env.STORE_TRANSCRIPT === 'true' ? speechResult : null,
-      transcriptPreview: speechResult ? speechResult.slice(0, 500) : '',
-      callerName: analysis.callerName || 'Tuntematon',
-      summary: analysis.summary || 'Ei yhteenvetoa.',
-      category: analysis.category || 'epäselvä',
-      priority: analysis.priority || 'matala',
-      recommendedAction: analysis.recommendedAction || 'tarkista varoen',
-      spamRisk: Number(analysis.spamRisk ?? 50),
-      speechConfidence: confidence,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  } catch (error) {
-    console.error('Call processing failed:', error);
-
-    await db.collection(COLLECTION).add({
-      type: 'ai_voicemail_error',
-      callSid,
-      fromMasked: maskPhone(caller),
-      toNumber: called,
-      transcriptPreview: speechResult ? speechResult.slice(0, 500) : '',
-      summary: 'Puhelun analysointi epäonnistui, mutta viesti vastaanotettiin.',
-      category: 'epäselvä',
-      priority: 'matala',
-      recommendedAction: 'tarkista varoen',
-      error: String(error.message || error),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  }
-
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ language: 'fi-FI', voice: 'Polly.Suvi' },
-    'Kiitos. Välitän viestin eteenpäin. Mukavaa päivänjatkoa.'
-  );
-  twiml.hangup();
-
-  res.type('text/xml').send(twiml.toString());
+// Dashboard
+app.get("/dashboard", (req, res) => {
+  res.sendFile(__dirname + "/dashboard-ai-voicemail.html");
 });
-app.get('/api/calls', async (req, res) => {
+
+// Puheluiden haku dashboardille
+app.get("/api/calls", async (req, res) => {
   try {
     const snapshot = await db
       .collection(COLLECTION)
-      .orderBy('createdAt', 'desc')
+      .orderBy("createdAt", "desc")
       .limit(50)
       .get();
 
-    const calls = snapshot.docs.map(doc => ({
+    const calls = snapshot.docs.map((doc) => ({
       id: doc.id,
-      ...doc.data()
+      ...doc.data(),
     }));
 
     res.json(calls);
   } catch (error) {
-    console.error('Virhe puheluiden haussa:', error);
-    res.status(500).json({ error: 'Puheluiden haku epäonnistui' });
+    console.error("Virhe puheluiden haussa:", error);
+    res.status(500).json({ error: "Puheluiden haku epäonnistui" });
   }
 });
+
+// Oletusasetukset
+const defaultAssistantSettings = {
+  activeReply: "reply1",
+  replies: {
+    reply1: {
+      name: "Palaveri",
+      message:
+        "Hei, olen juuri palaverissa. Kerro lyhyesti nimesi ja asiasi, niin välitän viestin eteenpäin.",
+    },
+    reply2: {
+      name: "Reissussa",
+      message:
+        "Hei, olen tällä hetkellä reissussa enkä pääse vastaamaan. Kerro lyhyesti nimesi ja asiasi, niin palaan asiaan myöhemmin.",
+    },
+    reply3: {
+      name: "Yleinen",
+      message:
+        "Hei, olet yhteydessä tekoälyavustajaan. Kerro lyhyesti nimesi ja asiasi.",
+    },
+  },
+};
+
+async function getAssistantSettings() {
+  const doc = await db.collection("settings").doc("assistant").get();
+
+  if (!doc.exists) {
+    return defaultAssistantSettings;
+  }
+
+  const data = doc.data();
+
+  return {
+    ...defaultAssistantSettings,
+    ...data,
+    replies: {
+      ...defaultAssistantSettings.replies,
+      ...(data.replies || {}),
+    },
+  };
+}
+
+async function getActiveAssistantMessage() {
+  const settings = await getAssistantSettings();
+  const activeReply = settings.activeReply || "reply1";
+  const reply = settings.replies?.[activeReply];
+
+  return reply?.message || defaultAssistantSettings.replies.reply1.message;
+}
+
+// Asetusten haku dashboardille
+app.get("/api/settings", async (req, res) => {
+  try {
+    const settings = await getAssistantSettings();
+    res.json(settings);
+  } catch (error) {
+    console.error("Asetusten haku epäonnistui:", error);
+    res.status(500).json({ error: "Asetusten haku epäonnistui" });
+  }
+});
+
+// Asetusten tallennus dashboardilta
+app.post("/api/settings", async (req, res) => {
+  try {
+    const { activeReply, replies } = req.body;
+
+    await db.collection("settings").doc("assistant").set(
+      {
+        activeReply,
+        replies,
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Asetusten tallennus epäonnistui:", error);
+    res.status(500).json({ error: "Asetusten tallennus epäonnistui" });
+  }
+});
+
+// Twilio soittaa tähän
+app.post("/voice", async (req, res) => {
+  try {
+    const twiml = new twilio.twiml.VoiceResponse();
+    const assistantMessage = await getActiveAssistantMessage();
+
+    const gather = twiml.gather({
+      input: "speech",
+      action: "/process-speech",
+      method: "POST",
+      language: "fi-FI",
+      speechTimeout: "auto",
+      timeout: 6,
+    });
+
+    gather.say(
+      {
+        language: "fi-FI",
+      },
+      assistantMessage
+    );
+
+    twiml.say(
+      {
+        language: "fi-FI",
+      },
+      "En kuullut vastausta. Voit yrittää myöhemmin uudelleen. Hei hei."
+    );
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  } catch (error) {
+    console.error("Virhe /voice reitissä:", error);
+
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say(
+      {
+        language: "fi-FI",
+      },
+      "Puhelinavustajassa tapahtui virhe. Yritä myöhemmin uudelleen."
+    );
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  }
+});
+
+// Puheen käsittely
+app.post("/process-speech", async (req, res) => {
+  try {
+    const speechText = req.body.SpeechResult || "";
+    const from = req.body.From || "Tuntematon";
+    const callSid = req.body.CallSid || "";
+
+    let ai = {
+      category: "Epäselvä",
+      priority: "keskitaso",
+      summary: speechText || "Ei puhesisältöä",
+      recommendedAction: "Tarkista puhelu",
+      spamRisk: 20,
+      riskReason: "Ei tarkempaa analyysiä",
+    };
+
+    if (process.env.OPENAI_API_KEY && speechText) {
+      try {
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content:
+                  "Analysoi suomenkielinen puhelu. Vastaa vain JSON-muodossa kentillä: category, priority, summary, recommendedAction, spamRisk, riskReason. priority on matala, keskitaso tai korkea. spamRisk on numero 0-100.",
+              },
+              {
+                role: "user",
+                content: speechText,
+              },
+            ],
+            temperature: 0.2,
+          }),
+        });
+
+        const data = await response.json();
+        const text = data.choices?.[0]?.message?.content || "";
+
+        const cleaned = text
+          .replace(/```json/g, "")
+          .replace(/```/g, "")
+          .trim();
+
+        ai = {
+          ...ai,
+          ...JSON.parse(cleaned),
+        };
+      } catch (openAiError) {
+        console.error("OpenAI-analyysi epäonnistui:", openAiError);
+      }
+    }
+
+    await db.collection(COLLECTION).add({
+      from,
+      callerNumber: from,
+      callSid,
+      transcript: speechText,
+      speechText,
+      category: ai.category || "Epäselvä",
+      priority: ai.priority || "keskitaso",
+      summary: ai.summary || speechText || "Ei yhteenvetoa",
+      recommendedAction: ai.recommendedAction || "Tarkista puhelu",
+      spamRisk: Number(ai.spamRisk ?? 20),
+      riskReason: ai.riskReason || "Ei riskiselitettä",
+      status: "new",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const twiml = new twilio.twiml.VoiceResponse();
+
+    twiml.say(
+      {
+        language: "fi-FI",
+      },
+      "Kiitos. Välitän viestin eteenpäin. Hei hei."
+    );
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  } catch (error) {
+    console.error("Virhe /process-speech reitissä:", error);
+
+    const twiml = new twilio.twiml.VoiceResponse();
+
+    twiml.say(
+      {
+        language: "fi-FI",
+      },
+      "Kiitos soitosta. Viestin käsittelyssä tapahtui virhe."
+    );
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`AI Puhelinvastaaja backend käynnissä portissa ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
