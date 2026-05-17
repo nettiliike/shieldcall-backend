@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="fi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Puhelinvastaaja - Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f5f7fb; margin:0; padding:24px; color:#111827; }
+    .wrap { max-width: 980px; margin:0 auto; }
+    h1 { margin-bottom: 6px; }
+    .muted { color:#6b7280; margin-bottom:24px; }
+    .card { background:white; border-radius:16px; padding:18px; margin-bottom:14px; box-shadow:0 6px 24px rgba(0,0,0,.07); }
+    .row { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+    .badge { display:inline-block; padding:5px 10px; border-radius:999px; background:#eef2ff; font-size:13px; }
+    .high { background:#fee2e2; }
+    .mid { background:#fef3c7; }
+    .low { background:#dcfce7; }
+    .summary { font-size:17px; margin:12px 0; }
+    .small { font-size:13px; color:#6b7280; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AI Puhelinvastaaja</h1>
+    <div class="muted">Viimeisimmät puhelut ja yhteenvedot</div>
+    <div id="calls">Ladataan...</div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+    import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+    // TODO: korvaa omalla Firebase web configilla, jos käytät tätä erillisenä dashboardina.
+    const firebaseConfig = {
+      apiKey: 'YOUR_API_KEY',
+      authDomain: 'YOUR_PROJECT.firebaseapp.com',
+      projectId: 'YOUR_PROJECT_ID'
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    const el = document.getElementById('calls');
+    const q = query(collection(db, 'calls'), orderBy('createdAt', 'desc'), limit(50));
+
+    function esc(v) {
+      return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    }
+
+    function priorityClass(p) {
+      if (p === 'korkea') return 'high';
+      if (p === 'keskitaso') return 'mid';
+      return 'low';
+    }
+
+    onSnapshot(q, snap => {
+      if (snap.empty) {
+        el.innerHTML = '<div class="card">Ei puheluita vielä.</div>';
+        return;
+      }
+
+      el.innerHTML = snap.docs.map(doc => {
+        const d = doc.data();
+        const date = d.createdAt?.toDate ? d.createdAt.toDate().toLocaleString('fi-FI') : '';
+        return `
+          <div class="card">
+            <div class="row">
+              <div>
+                <strong>📞 ${esc(d.fromMasked || 'Tuntematon')}</strong>
+                <div class="small">${esc(date)}</div>
+              </div>
+              <div>
+                <span class="badge ${priorityClass(d.priority)}">${esc(d.priority || 'matala')}</span>
+                <span class="badge">${esc(d.category || 'epäselvä')}</span>
+              </div>
+            </div>
+            <div class="summary">🧠 ${esc(d.summary || 'Ei yhteenvetoa')}</div>
+            <div><strong>Suositus:</strong> ${esc(d.recommendedAction || 'tarkista')}</div>
+            <div class="small">Spam-risk: ${esc(d.spamRisk ?? '-')} / 100</div>
+          </div>
+        `;
+      }).join('');
+    }, err => {
+      console.error(err);
+      el.innerHTML = '<div class="card">Dashboardin lataus epäonnistui. Tarkista Firebase config ja Firestore rules.</div>';
+    });
+  </script>
+</body>
+</html>
