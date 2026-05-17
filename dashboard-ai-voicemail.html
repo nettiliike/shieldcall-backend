@@ -26,25 +26,17 @@
     <div id="calls">Ladataan...</div>
   </div>
 
-  <script type="module">
-    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-    import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-
-    // TODO: korvaa omalla Firebase web configilla, jos käytät tätä erillisenä dashboardina.
-    const firebaseConfig = {
-      apiKey: 'YOUR_API_KEY',
-      authDomain: 'YOUR_PROJECT.firebaseapp.com',
-      projectId: 'YOUR_PROJECT_ID'
-    };
-
-    const app = initializeApp(firebaseConfig);
-    const db = getFirestore(app);
-
+  <script>
     const el = document.getElementById('calls');
-    const q = query(collection(db, 'calls'), orderBy('createdAt', 'desc'), limit(50));
 
     function esc(v) {
-      return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+      return String(v ?? '').replace(/[&<>'"]/g, c => ({
+        '&':'&amp;',
+        '<':'&lt;',
+        '>':'&gt;',
+        "'":'&#39;',
+        '"':'&quot;'
+      }[c]));
     }
 
     function priorityClass(p) {
@@ -53,37 +45,62 @@
       return 'low';
     }
 
-    onSnapshot(q, snap => {
-      if (snap.empty) {
-        el.innerHTML = '<div class="card">Ei puheluita vielä.</div>';
-        return;
+    function formatDate(createdAt) {
+      if (createdAt?._seconds) {
+        return new Date(createdAt._seconds * 1000).toLocaleString('fi-FI');
       }
 
-      el.innerHTML = snap.docs.map(doc => {
-        const d = doc.data();
-        const date = d.createdAt?.toDate ? d.createdAt.toDate().toLocaleString('fi-FI') : '';
-        return `
-          <div class="card">
-            <div class="row">
-              <div>
-                <strong>📞 ${esc(d.fromMasked || 'Tuntematon')}</strong>
-                <div class="small">${esc(date)}</div>
+      if (createdAt?.seconds) {
+        return new Date(createdAt.seconds * 1000).toLocaleString('fi-FI');
+      }
+
+      if (typeof createdAt === 'string') {
+        return new Date(createdAt).toLocaleString('fi-FI');
+      }
+
+      return '';
+    }
+
+    async function loadCalls() {
+      try {
+        const res = await fetch('/api/calls');
+        const calls = await res.json();
+
+        if (!Array.isArray(calls) || calls.length === 0) {
+          el.innerHTML = '<div class="card">Ei puheluita vielä.</div>';
+          return;
+        }
+
+        el.innerHTML = calls.map(d => {
+          const date = formatDate(d.createdAt);
+
+          return `
+            <div class="card">
+              <div class="row">
+                <div>
+                  <strong>📞 ${esc(d.fromMasked || d.from || d.phone || 'Tuntematon')}</strong>
+                  <div class="small">${esc(date)}</div>
+                </div>
+                <div>
+                  <span class="badge ${priorityClass(d.priority)}">${esc(d.priority || 'matala')}</span>
+                  <span class="badge">${esc(d.category || 'epäselvä')}</span>
+                </div>
               </div>
-              <div>
-                <span class="badge ${priorityClass(d.priority)}">${esc(d.priority || 'matala')}</span>
-                <span class="badge">${esc(d.category || 'epäselvä')}</span>
-              </div>
+
+              <div class="summary">🧠 ${esc(d.summary || d.aiSummary || 'Ei yhteenvetoa')}</div>
+
+              <div><strong>Suositus:</strong> ${esc(d.recommendedAction || d.action || 'tarkista')}</div>
+              <div class="small">Spam-risk: ${esc(d.spamRisk ?? d.riskScore ?? '-')} / 100</div>
             </div>
-            <div class="summary">🧠 ${esc(d.summary || 'Ei yhteenvetoa')}</div>
-            <div><strong>Suositus:</strong> ${esc(d.recommendedAction || 'tarkista')}</div>
-            <div class="small">Spam-risk: ${esc(d.spamRisk ?? '-')} / 100</div>
-          </div>
-        `;
-      }).join('');
-    }, err => {
-      console.error(err);
-      el.innerHTML = '<div class="card">Dashboardin lataus epäonnistui. Tarkista Firebase config ja Firestore rules.</div>';
-    });
+          `;
+        }).join('');
+      } catch (err) {
+        console.error(err);
+        el.innerHTML = '<div class="card">Dashboardin lataus epäonnistui.</div>';
+      }
+    }
+
+    loadCalls();
   </script>
 </body>
 </html>
